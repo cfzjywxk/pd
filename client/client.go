@@ -184,7 +184,14 @@ func (c *client) tsCancelLoop() {
 }
 
 func (c *client) tsLoop() {
-	defer c.wg.Done()
+	var err error
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("[pd] tsLoop panic", zap.Stack("stack"))
+		}
+		log.Error("[pd] tsLoop has quit", zap.Error(err))
+		c.wg.Done()
+	}()
 
 	loopCtx, loopCancel := context.WithCancel(c.ctx)
 	defer loopCancel()
@@ -195,7 +202,6 @@ func (c *client) tsLoop() {
 	var cancel context.CancelFunc
 
 	for {
-		var err error
 
 		if stream == nil {
 			var ctx context.Context
@@ -356,6 +362,7 @@ func (c *client) Close() {
 			log.Error("[pd] failed close grpc clientConn", zap.Error(err))
 		}
 	}
+	log.Info("[pd] pd client has closed")
 }
 
 // leaderClient gets the client of current PD leader.
