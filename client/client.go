@@ -91,11 +91,12 @@ func WithExcludeTombstone() GetStoreOption {
 }
 
 type tsoRequest struct {
-	start    time.Time
-	ctx      context.Context
-	done     chan error
-	physical int64
-	logical  int64
+	start     time.Time
+	ctx       context.Context
+	done      chan error
+	physical  int64
+	logical   int64
+	hasWaited bool
 }
 
 const (
@@ -184,7 +185,14 @@ func (c *client) tsCancelLoop() {
 }
 
 func (c *client) tsLoop() {
-	defer c.wg.Done()
+	var err error
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("[pd] tsLoop panic", zap.Stack("stack"))
+		}
+		log.Error("[pd] tsLoop has quit", zap.Error(err))
+		c.wg.Done()
+	}()
 
 	loopCtx, loopCancel := context.WithCancel(c.ctx)
 	defer loopCancel()
@@ -195,7 +203,6 @@ func (c *client) tsLoop() {
 	var cancel context.CancelFunc
 
 	for {
-		var err error
 
 		if stream == nil {
 			var ctx context.Context
@@ -242,6 +249,9 @@ func (c *client) tsLoop() {
 			}
 			opts = extractSpanReference(requests, opts[:0])
 			err = c.processTSORequests(stream, requests, opts)
+			if err != nil {
+				log.Error("[pd] processing tso requests error", zap.Error(err))
+			}
 			close(done)
 			requests = requests[:0]
 		case <-loopCtx.Done():
@@ -356,6 +366,7 @@ func (c *client) Close() {
 			log.Error("[pd] failed close grpc clientConn", zap.Error(err))
 		}
 	}
+	log.Info("[pd] pd client has closed")
 }
 
 // leaderClient gets the client of current PD leader.
@@ -396,6 +407,13 @@ type TSFuture interface {
 }
 
 func (req *tsoRequest) Wait() (physical int64, logical int64, err error) {
+	defer func() {
+		req.hasWaited = true
+	}()
+	if req.hasWaited {
+		log.Error("[pd] req has been waited twice", zap.Stack("stack"))
+		panic("one req should be waited only once")
+	}
 	// If tso command duration is observed very high, the reason could be it
 	// takes too long for Wait() be called.
 	start := time.Now()
@@ -403,7 +421,7 @@ func (req *tsoRequest) Wait() (physical int64, logical int64, err error) {
 	select {
 	case err = <-req.done:
 		err = errors.WithStack(err)
-		defer tsoReqPool.Put(req)
+		//defer tsoReqPool.Put(req)
 		if err != nil {
 			cmdFailDurationTSO.Observe(time.Since(req.start).Seconds())
 			return 0, 0, err
